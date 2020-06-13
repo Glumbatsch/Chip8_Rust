@@ -1,11 +1,30 @@
 use std::fs::File;
 use std::io::Read;
 
-use rand::prelude::Rng;
-
 const TEXTURE_SIZE :usize = 32*64;
 const SCREEN_WIDTH :u8 = 64;
 const SCREEN_HEIGHT :u8 = 32;
+
+const FONT_SET : [u8;80] =
+[
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+];
+
 
 fn was_key_pressed() -> bool
 {
@@ -71,12 +90,11 @@ struct Chip
     oppcode_data: OppCodeData,
 }
 
-
 impl Chip
 {
     fn new() -> Chip
     {
-        let chip = Chip{
+        let mut chip = Chip{
             current_opcode: 0,
             memory: [0;4096],
             registers: [0;16],
@@ -90,13 +108,13 @@ impl Chip
             keys : [0;16],
             oppcode_data: OppCodeData::new(0x0000),
         };
-        // Load fontset
+        chip.load_font(&FONT_SET);
         return chip;
     }
 
-    fn load_rom(&mut self, fileLocation: &str) -> ()
+    fn load_rom(&mut self, file_location: &str) -> ()
     {
-        let path : &std::path::Path = std::path::Path::new(fileLocation);
+        let path : &std::path::Path = std::path::Path::new(file_location);
         
         let mut file = match File::open(&path)
         {
@@ -121,7 +139,7 @@ impl Chip
         self.current_opcode = opcode_lhs | opcode_rhs;
         self.oppcode_data.init(self.current_opcode);
 
-        // Decode opcode
+        // Decode and execute opcode
         match self.current_opcode & 0xF000
         {
             // Clear or return opcodes use least significant byte
@@ -235,15 +253,26 @@ impl Chip
 
                 // 0xFX1E adds register x to the index register (I) and sets register 0xF to 1 in case of overflow.
                 0x001E => self.add_to_index(),
+                
+                // 0xFX29 sets the index register to the memory location of the sprite of the 
+                // character stored in register x.
+                0x0029 => self.set_sprite_address(),
 
+                // 0xFX33 i don't know what this does
+                0x0033 => self.binary_coded_decimal(),
+
+                // 0xFX55 dump registers 0 - x into main memory.
+                0x0055 => self.register_dump(),
+
+                // 0xFX65 load main memory into registers 0 - x.
+                0x0065 => self.register_load(),
 
                 _ => panic!("Unknown opcode: {}", self.current_opcode),
             }
 
-            
-
             _ => panic!("Unknown opcode: {}", self.current_opcode),
         }
+        // Advance program counter
         self.program_counter += 2;
 
         // Update timers
@@ -259,6 +288,11 @@ impl Chip
             }
             self.sound_timer -= 1;
         }
+    }
+
+    fn load_font(&mut self, font_set: &[u8;80]) -> ()
+    {
+        self.memory[..80].copy_from_slice(font_set);
     }
 
     // Opcode implementations
@@ -537,14 +571,50 @@ impl Chip
 
     /// 0xFX29: Sets the index register (I) to the location of the sprite for the character in register x.
     /// Characters 0x0-0xF are represented by a 4x5 font.
+    /// Each font sprite is 5 bytes in size.
     fn set_sprite_address(&mut self) -> ()
     {
-        
+        self.index_register = self.registers[self.oppcode_data.x as usize] as u16 * 5;
+    }
+
+    /// 0xFX33: Stores the decimal representation of register x and stores each character into
+    /// memory at the address that the index register is pointing to (with a maximum of 3). 
+    fn binary_coded_decimal(&mut self) -> ()
+    {
+        let base :usize = self.index_register as usize;
+        self.memory[base + 0] = (self.registers[self.oppcode_data.x as usize] / 100) %10;
+        self.memory[base + 1] = (self.registers[self.oppcode_data.x as usize] / 10) %10;
+        self.memory[base + 2] = self.registers[self.oppcode_data.x as usize] %10;
+
+    }
+
+    /// 0xFX55: Stores the content of register 0-X (x inclusive) at main memory, starting at
+    /// the addres at the index register (I).
+    fn register_dump(&mut self) -> ()
+    {
+        let base: usize = self.index_register as usize; 
+        for i in 0..=self.oppcode_data.x as usize
+        {
+            self.memory[base + i] = self.registers[i];
+        }
+    }
+    
+    /// 0xFX65: Loads the memory pointed at by the index register (I) into the registers 0-X(x inclusive).
+    fn register_load(&mut self) -> ()
+    {
+        let base: usize = self.index_register as usize; 
+        for i in 0..=self.oppcode_data.x as usize
+        {
+            self.registers[i] = self.memory[base + i];
+        }
     }
 
 }
 
 fn main()
 {
-    let _chip : Chip = Chip::new();
+    let mut chip : Chip = Chip::new();
+    // chip.load_font(&FONT_SET);
+    println!("Hello");
+    println!("Chip8");
 }
